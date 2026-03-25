@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IP KVM WebSocket</title>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; }
+        #kvm-container { position: relative; width: 100vw; height: 100vh; }
+        #video-stream { width: 100%; height: 100%; object-fit: contain; display: block; }
+        #input-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 10; cursor: crosshair; }
+        #status { position: absolute; top: 10px; right: 10px; z-index: 20; background: rgba(0,0,0,0.7); color: #0f0; padding: 5px 10px; font-family: monospace; border-radius: 4px; }
+        #queue-info { position: absolute; top: 40px; right: 10px; z-index: 20; background: rgba(0,0,0,0.7); color: #ff0; padding: 5px 10px; font-family: monospace; border-radius: 4px; }
+    </style>
+</head>
+<body>
+<div id="kvm-container">
+    <img id="video-stream" src="http://192.168.1.100:8080/video" alt="KVM Stream">
+    <div id="input-layer"></div>
+    <div id="status">Status: Disconnected</div>
+    <div id="queue-info">Queue: 0</div>
+</div>
+
+<script>
+$(document).ready(function() {
+    // --- НАСТРОЙКИ ---
+    // Замени IP на адрес твоего Android
+    const WS_URL = "ws://192.168.1.100:5000"; 
+    const DISPATCH_INTERVAL_MS = 20; // Можно уменьшить, WebSocket быстрее HTTP
+
+    // --- ОЧЕРЕДЬ И СОСТОЯНИЕ ---
+    let commandQueue = [];
+    let sendLocked = false;
+    let ws = null;
+
+    function updateQueueInfo() {
+        $('#queue-info').text('Queue: ' + commandQueue.length);
+    }
+
+    function setStatus(msg, color) {
+        $('#status').text(msg).css('color', color || '#0f0');
+    }
+
+    // --- WEBSOCKET ---
+    function connectWebSocket() {
+        ws = new WebSocket(WS_URL);
+
+        ws.onopen = function() {
+            setStatus('Status: Connected');
+            console.log("WS Connected");
+        };
+
+        ws.onclose = function() {
+            setStatus('Status: Disconnected', 'red');
+            console.log("WS Closed. Reconnecting...");
+            setTimeout(connectWebSocket, 2000); // Авто-реконнект
+        };
+
+        ws.onerror = function(err) {
+            setStatus('Status: Error', 'red');
+            console.error("WS Error", err);
+            ws.close();
+        };
+    }
+
+    // --- ОЧЕРЕДЬ (Твоя логика) ---
+    function queueCommand(data) {
+        // Простая защита: не слать, если нет соединения
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+            return; 
+        }
+        commandQueue.push(data);
+        updateQueueInfo();
+    }
+
+    function queueSendCmd() {
+        if (sendLocked) return;
+        if (commandQueue.length === 0) return;
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+        sendLocked = true;
+        const data = commandQueue.shift();
+        updateQueueInfo();
+
+        try {
+            ws.send(JSON.stringify(data));
+            // В WebSocket нет явного "ответа" на каждое сообщение в этом протоколе.
+            // Считаем отправку успешной сразу, если нет ошибки.
+            sendLocked = false; 
+        } catch (e) {
+            console.error("Send error", e);
+            sendLocked = false;
+            commandQueue.unshift(data); // Вернуть команду в очередь
+        }
+    }
+
+    // Запуск диспетчера
+    setInterval(queueSendCmd, DISPATCH_INTERVAL_MS);
+    connectWebSocket();
+
+    // --- СОБЫТИЯ ---
+    $(document).on('keydown', e => queueCommand({ type: 'K', code: e.keyCode, state: 1 }));
+    $(document).on('keyup', e => queueCommand({ type: 'K', code: e.keyCode, state: 0 }));
+
+    const $inputLayer = $('#input-layer');
+    $inputLayer.on('mousedown', () => queueCommand({ type: 'B', btn: 1, state: 1 }));
+    $inputLayer.on('mouseup', () => queueCommand({ type: 'B', btn: 1, state: 0 }));
+    
+    $inputLayer.on('mousemove', function(e) {
+        const video = document.getElementById('video-stream');
+        const rect = video.getBoundingClientRect();
+        const x = Math.floor(e.clientX - rect.left);
+        const y = Math.floor(e.clientY - rect.top);
+        if (x >= 0 && y >= 0 && x <= rect.width && y <= rect.height) {
+            queueCommand({ type: 'M', x: x, y: y });
+        }
+    });
+    $inputLayer.on('contextmenu', e => { e.preventDefault(); return false; });
+});
+</script>
+</body>
+</html>
